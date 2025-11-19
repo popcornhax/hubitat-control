@@ -1,0 +1,54 @@
+############################
+# Node / TypeScript
+############################
+node_modules/
+dist/
+build/
+*.map
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+############################
+# Stream Deck plugin folder
+############################
+# Compiled JS + maps go in bin; don’t commit them
+com.popcornhax.hubitat-control.sdPlugin/bin/
+
+# Plugin logs
+com.popcornhax.hubitat-control.sdPlugin/logs/
+com.popcornhax.hubitat-control.sdPlugin/*.log
+
+# Packaged plugin bundles
+*.streamDeckPlugin
+
+############################
+# macOS noise
+############################
+.DS_Store
+.AppleDouble
+.LSOverride
+
+############################
+# VS Code
+############################
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+############################
+# Temp / backup files
+############################
+*.tmp
+*.swp
+*.swo
+*~
+Thumbs.db
+
+############################
+# Env
+############################
+.env
+.env.*

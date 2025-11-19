@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+
+<head lang="en">
+  <title>Hubitat Control Settings</title>
+  <meta charset="utf-8" />
+  <!-- sdpi-components handles binding to Stream Deck settings via `setting="..."` -->
+  <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+  <style>
+    /* Global font: system sans, works in both light & dark */
+
+    /* Fancy heading with lines on both sides */
+    sdpi-heading {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+      font-size: 9pt;
+
+      display: flex;
+      flex-basis: 100%;
+      align-items: center;
+      color: var(--sdpi-color, #9a9a9a);
+      font-size: 9pt;
+      margin: 8px 0;
+      opacity: 0.9;
+    }
+
+    sdpi-heading::before,
+    sdpi-heading::after {
+      content: "";
+      flex-grow: 1;
+      /* use sdpi background var if present, otherwise a subtle line */
+      background: var(--sdpi-background, #3D3D3D);
+      height: 1px;
+      font-size: 0;
+      line-height: 0;
+      margin: 0 16px;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Connection section -->
+  <sdpi-heading>Hubitat Connection</sdpi-heading>
+
+  <sdpi-item label="Hub IP">
+    <sdpi-textfield setting="hubIp" placeholder="e.g. 192.168.1.64">
+    </sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Maker API App ID">
+    <sdpi-textfield setting="appId" placeholder="e.g. 126">
+    </sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Access Token">
+    <sdpi-textfield setting="accessToken" placeholder="e.g. long-hex-code-token">
+    </sdpi-textfield>
+  </sdpi-item>
+
+  <!-- Device section -->
+  <sdpi-heading>Device</sdpi-heading>
+
+  <sdpi-item label="Device">
+    <sdpi-select setting="deviceId" label-setting="deviceLabel" placeholder="Choose device" datasource="hubitatDevices"
+      loading="Loading Hubitat devices..." show-refresh>
+    </sdpi-select>
+  </sdpi-item>
+
+  <sdpi-item label="Command">
+    <sdpi-select setting="command" placeholder="Choose command" datasource="hubitatCommands"
+      loading="Loading commands..." show-refresh>
+    </sdpi-select>
+  </sdpi-item>
+  <sdpi-item label="Command Parameter">
+    <sdpi-textfield setting="commandArg" placeholder="e.g. 50, 3000, 75">
+    </sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-heading>Status Icons</sdpi-heading>
+
+  <sdpi-item label="Status attribute">
+    <sdpi-select setting="statusAttribute" placeholder="Choose attribute" datasource="hubitatStatusAttributes"
+      loading="Loading attributes..." show-refresh>
+    </sdpi-select>
+  </sdpi-item>
+
+  <sdpi-item label="Expected value">
+    <sdpi-textfield setting="statusMatchValue" placeholder="e.g. on, off, open, closed"></sdpi-textfield>
+  </sdpi-item>
+
+  <sdpi-item label="Image when matched">
+    <sdpi-file setting="statusMatchedImage"></sdpi-file>
+  </sdpi-item>
+
+  <sdpi-item label="Image when unmatched">
+    <sdpi-file setting="statusUnmatchedImage"></sdpi-file>
+  </sdpi-item>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const deviceSelect = document.querySelector('sdpi-select[setting="deviceId"]');
+      const commandSelect = document.querySelector('sdpi-select[setting="command"]');
+      const commandArgField = document.querySelector('sdpi-textfield[setting="commandArg"]');
+      const statusAttrSelect = document.querySelector('sdpi-select[setting="statusAttribute"]');
+
+      // Helper to fire an input event so sdpi-components pushes the new value into settings.
+      function triggerInput(el) {
+        if (!el) return;
+        const evt = new Event('input', { bubbles: true, cancelable: true });
+        el.dispatchEvent(evt);
+      }
+
+      // When the command changes, clear the command parameter.
+      if (commandSelect && commandArgField) {
+        commandSelect.addEventListener('input', () => {
+          if ('value' in commandArgField) {
+            // @ts-ignore
+            commandArgField.value = '';
+          }
+          triggerInput(commandArgField);
+        });
+      }
+
+      // When the device changes, clear command, parameter, and status attribute,
+      // then refresh both the command and status attribute data sources.
+      if (deviceSelect) {
+        deviceSelect.addEventListener('input', () => {
+          // Clear command
+          if (commandSelect) {
+            if ('value' in commandSelect) {
+              // @ts-ignore
+              commandSelect.value = '';
+            }
+            triggerInput(commandSelect);
+          }
+
+          // Clear command parameter
+          if (commandArgField) {
+            if ('value' in commandArgField) {
+              // @ts-ignore
+              commandArgField.value = '';
+            }
+            triggerInput(commandArgField);
+          }
+
+          // Clear status attribute
+          if (statusAttrSelect) {
+            if ('value' in statusAttrSelect) {
+              // @ts-ignore
+              statusAttrSelect.value = '';
+            }
+            triggerInput(statusAttrSelect);
+          }
+
+          // Refresh commands and status attributes. sdpi-select may not have
+          // its `refresh` method available immediately on first run (custom
+          // element may upgrade asynchronously) and sdpi-components may
+          // write the new `deviceId` setting asynchronously. Schedule the
+          // refresh on the next macrotask so the new setting has time to be
+          // persisted, and retry if the element isn't upgraded yet.
+          function ensureRefresh(el) {
+            if (!el) return;
+            if (typeof el.refresh === 'function') {
+              el.refresh();
+              return;
+            }
+
+            // Retry a few times while waiting for the element to be upgraded.
+            const start = Date.now();
+            const interval = setInterval(() => {
+              if (typeof el.refresh === 'function') {
+                clearInterval(interval);
+                el.refresh();
+                return;
+              }
+              // give up after 2s
+              if (Date.now() - start > 2000) {
+                clearInterval(interval);
+              }
+            }, 50);
+          }
+
+          // Schedule the refresh to allow sdpi-components to persist the
+          // new `deviceId` setting first. A short delay (50ms) is used to be
+          // robust across environments; adjust if necessary.
+          setTimeout(() => {
+            ensureRefresh(commandSelect);
+            ensureRefresh(statusAttrSelect);
+          }, 50);
+        });
+      }
+    });
+  </script>
+</body>
+
+</html>

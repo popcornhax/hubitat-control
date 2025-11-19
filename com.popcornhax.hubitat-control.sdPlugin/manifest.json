@@ -1,0 +1,44 @@
+{
+	"Name": "Hubitat Control",
+	"Version": "0.1.0.0",
+	"Author": "popcornhax",
+	"Actions": [
+		{
+		"UUID": "com.popcornhax.hubitat-control.control",
+		"Name": "Full Device Control",
+		"Icon": "imgs/actions/counter/icon",
+		"Tooltip": "Control any Hubitat device",
+		"PropertyInspectorPath": "ui/hubitat-control.html",
+		"States": [
+			{
+			"Image": "imgs/actions/counter/key"
+			}
+		],
+		"Controllers": ["Keypad"]
+		}
+	],
+	"Category": "Hubitat Control",
+	"CategoryIcon": "imgs/plugin/category-icon",
+	"CodePath": "bin/plugin.js",
+	"Description": "Control Hubitat Devices from your Stream Deck",
+	"Icon": "imgs/plugin/marketplace",
+	"SDKVersion": 2,
+	"Software": {
+		"MinimumVersion": "6.5"
+	},
+	"OS": [
+		{
+			"Platform": "mac",
+			"MinimumVersion": "12"
+		},
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Nodejs": {
+		"Version": "20",
+		"Debug": "enabled"
+	},
+	"UUID": "com.popcornhax.hubitat-control"
+}
