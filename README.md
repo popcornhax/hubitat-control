@@ -51,7 +51,17 @@ npm run build
 The compiled plugin appears in:  
 com.popcornhax.hubitat-control.sdPlugin/bin/
 
-To package for release:
+## Packaging A Release
 
-zip -r HubitatControl.streamDeckPlugin com.popcornhax.hubitat-control.sdPlugin
+1. Bump the plugin version in:  
+   `com.popcornhax.hubitat-control.sdPlugin/manifest.json`  
+2. Build:
 
+npm run build
+
+3. Package with a versioned filename:
+
+VERSION=0.2.0  
+zip -r ../releases/"HubitatControl.${VERSION}.streamDeckPlugin" com.popcornhax.hubitat-control.sdPlugin
+
+4. Import by double-clicking the `.streamDeckPlugin` file (or use Stream Deck > More Actions > Install from file).

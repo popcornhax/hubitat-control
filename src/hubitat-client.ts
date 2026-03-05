@@ -29,6 +29,7 @@ export type HubitatDevice = {
  * Lightweight client for Hubitat Maker API, used by the Stream Deck plugin.
  */
 export class HubitatClient {
+  private static readonly REQUEST_TIMEOUT_MS = 4000;
   private readonly baseUrl: string;
   private readonly accessToken: string;
 
@@ -50,12 +51,28 @@ export class HubitatClient {
     return `${this.baseUrl}${sep}${path}?access_token=${this.accessToken}`;
   }
 
+  private async fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HubitatClient.REQUEST_TIMEOUT_MS);
+
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error(`Hubitat request timed out after ${HubitatClient.REQUEST_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   /**
    * List all devices exposed via Maker API.
    */
   async listDevices(): Promise<HubitatDevice[]> {
     const url = this.buildUrl("devices");
-    const res = await fetch(url);
+    const res = await this.fetchWithTimeout(url);
 
     if (!res.ok) {
       throw new Error(`Hubitat listDevices failed: ${res.status} ${res.statusText}`);
@@ -78,7 +95,7 @@ export class HubitatClient {
    */
   async getDevice(deviceId: string): Promise<HubitatDevice> {
     const url = this.buildUrl(`devices/${encodeURIComponent(deviceId)}`);
-    const res = await fetch(url);
+    const res = await this.fetchWithTimeout(url);
 
     if (!res.ok) {
       throw new Error(`Hubitat getDevice failed: ${res.status} ${res.statusText}`);
@@ -104,13 +121,17 @@ export class HubitatClient {
       : `devices/${encodeURIComponent(deviceId)}/${encodeURIComponent(command)}`;
 
     const url = this.buildUrl(commandPath);
-    const res = await fetch(url, { method: "GET" });
+    const res = await this.fetchWithTimeout(url, { method: "GET" });
 
     if (!res.ok) {
       throw new Error(
         `Hubitat sendCommand failed (${deviceId} ${command}): ${res.status} ${res.statusText}`,
       );
     }
+
+    // Consume and discard the response body so the underlying connection is
+    // released back to the pool rather than held open.
+    await res.body?.cancel();
   }
 
   /**
@@ -170,7 +191,7 @@ export class HubitatClient {
     const url = this.buildUrl(
       `devices/${encodeURIComponent(deviceId)}/attribute/${encodeURIComponent(attributeName)}`,
     );
-    const res = await fetch(url);
+    const res = await this.fetchWithTimeout(url);
 
     if (!res.ok) {
       throw new Error(

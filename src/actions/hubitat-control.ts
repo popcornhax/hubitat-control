@@ -7,6 +7,7 @@ import streamDeck, {
   SendToPluginEvent,
   SingletonAction,
   WillAppearEvent,
+  WillDisappearEvent,
 } from "@elgato/streamdeck";
 
 import { HubitatClient, HubitatConfig } from "../hubitat-client";
@@ -46,14 +47,28 @@ export type HubitatControlSettings = {
 
 @action({ UUID: "com.popcornhax.hubitat-control.control" })
 export class HubitatControl extends SingletonAction<HubitatControlSettings> {
+  private readonly pollIntervalMs = 5000;
+  private isRefreshAllInFlight = false;
+  private clientCache = new Map<string, HubitatClient>();
+  private clientRefCountByKey = new Map<string, number>();
+  private clientKeyByContext = new Map<string, string>();
+  private visibleActionContexts = new Set<string>();
+  private pollTimer: NodeJS.Timeout | undefined;
+
+  // Tracks the last state and title sent to the Stream Deck app per context.
+  // Used to suppress redundant setImage/setTitle calls in the polling loop
+  private lastSentStateByContext = new Map<string, string | undefined>();
+  private lastSentTitleByContext = new Map<string, string>();
+
+  // Caches the most recent settings per context so the polling loop can use
+  // them without calling instance.getSettings() on every cycle. Each
+  // getSettings() call is a WebSocket round-trip whose response includes full
+  // base64 image data; at polling frequency this generates significant traffic
+  // to the host application.
+  private settingsByContext = new Map<string, HubitatControlSettings>();
+
   constructor() {
     super();
-
-
-    const intervalMs = 5000; // poll every 5s for now
-    setInterval(() => {
-      void this.refreshAllVisibleActions();
-    }, intervalMs);
   }
 
   // Tracks last connection/device key per context to avoid re-syncing on every keystroke.
@@ -67,6 +82,8 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
   override async onWillAppear(
     ev: WillAppearEvent<HubitatControlSettings>,
   ): Promise<void> {
+    this.markActionVisible(ev.action.id);
+
     const settings = ev.payload.settings ?? {};
 
     // Load any previously-saved global Hubitat connection settings.
@@ -78,6 +95,8 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
       appId: settings.appId ?? (global?.appId ?? undefined),
       accessToken: settings.accessToken ?? (global?.accessToken ?? undefined),
     };
+    this.updateContextClientTracking(ev.action.id, merged);
+    this.settingsByContext.set(ev.action.id, merged);
 
     const connectionChanged =
       merged.hubIp !== settings.hubIp ||
@@ -125,8 +144,9 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
       settings.deviceId ?? "",
     ].join("|");
 
-    // `context` exists at runtime but isn't declared on the TS type for this event.
-    const context = (ev as any).context as string | undefined;
+    const context = ev.action.id;
+    this.updateContextClientTracking(context, settings);
+    this.settingsByContext.set(context, settings);
 
     // If for some reason we can't get a context, fall back to the old behavior.
     if (!context) {
@@ -148,6 +168,15 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
     }
     // If only things like commandArg, statusMatchValue, etc. changed,
     // we skip updateFromDevice to avoid PI re-renders while typing.
+  }
+
+  override onWillDisappear(ev: WillDisappearEvent<HubitatControlSettings>): void {
+    this.markActionHidden(ev.action.id);
+    this.releaseContextClientTracking(ev.action.id);
+    this.lastConnectionKeyByContext.delete(ev.action.id);
+    this.lastSentStateByContext.delete(ev.action.id);
+    this.lastSentTitleByContext.delete(ev.action.id);
+    this.settingsByContext.delete(ev.action.id);
   }
 
   /**
@@ -323,17 +352,40 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
    * Periodically refresh all visible HubitatControl actions.
    */
   private async refreshAllVisibleActions(): Promise<void> {
+    if (this.isRefreshAllInFlight) {
+      return;
+    }
+
+    this.isRefreshAllInFlight = true;
+
     // this.actions is provided by SingletonAction and contains all visible
     // instances of this action UUID.
-    this.actions.forEach((instance) => {
-      void this.refreshSingleInstance(instance as any);
-    });
+    try {
+      const refreshes: Array<Promise<void>> = [];
+      this.actions.forEach((instance) => {
+        refreshes.push(this.refreshSingleInstance(instance as any));
+      });
+      await Promise.allSettled(refreshes);
+    } finally {
+      this.isRefreshAllInFlight = false;
+    }
   }
 
   private async refreshSingleInstance(instance: any): Promise<void> {
     try {
-      const settings =
-        ((await instance.getSettings()) as HubitatControlSettings | undefined) ?? {};
+      const context: string = instance.id;
+      let settings = this.settingsByContext.get(context);
+
+      if (!settings) {
+        // Cache miss: instance.id didn't match the key stored in onWillAppear/
+        // onDidReceiveSettings. Call getSettings() exactly once to recover, then
+        // store in the cache so all future polls use the cached copy and don't
+        // hit the host again.
+        settings = ((await instance.getSettings()) as HubitatControlSettings | undefined) ?? {};
+        if (settings.deviceId) {
+          this.settingsByContext.set(context, settings);
+        }
+      }
 
       const client = this.createClient(settings);
       if (!client || !settings.deviceId) {
@@ -346,8 +398,22 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
         lastKnownState: state,
       };
 
-      await this.updateKeyImage(instance, effectiveSettings, state);
-      await instance.setTitle(this.buildTitle(effectiveSettings));
+      const title = this.buildTitle(effectiveSettings);
+      const willUpdate = !this.lastSentStateByContext.has(context) || state !== this.lastSentStateByContext.get(context);
+
+      // Only send setImage when the device state has changed since the last poll,
+      // or on the first poll for this context (has() distinguishes "never sent"
+      // from "sent undefined", avoiding a false equality on first run).
+      if (willUpdate) {
+        await this.updateKeyImage(instance, effectiveSettings, state);
+        this.lastSentStateByContext.set(context, state);
+      }
+
+      // Similarly, only send setTitle when the title has actually changed.
+      if (title !== this.lastSentTitleByContext.get(context)) {
+        await instance.setTitle(title);
+        this.lastSentTitleByContext.set(context, title);
+      }
     } catch (err) {
       console.error("[HubitatControl] refreshSingleInstance error", err);
     }
@@ -390,13 +456,130 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
     settings: HubitatControlSettings,
   ): HubitatClient | undefined {
     const { hubIp, appId, accessToken } = settings;
+    const cacheKey = this.getClientCacheKey(settings);
+    if (!cacheKey) {
+      return undefined;
+    }
+
+    const cachedClient = this.clientCache.get(cacheKey);
+    if (cachedClient) {
+      return cachedClient;
+    }
 
     if (!hubIp || !appId || !accessToken) {
       return undefined;
     }
-
     const cfg: HubitatConfig = { hubIp, appId, accessToken };
-    return new HubitatClient(cfg);
+    const client = new HubitatClient(cfg);
+    this.clientCache.set(cacheKey, client);
+    return client;
+  }
+
+  private getClientCacheKey(settings: HubitatControlSettings): string | undefined {
+    const { hubIp, appId, accessToken } = settings;
+    if (!hubIp || !appId || !accessToken) {
+      return undefined;
+    }
+    return `${hubIp}|${appId}|${accessToken}`;
+  }
+
+  private markActionVisible(context: string | undefined): void {
+    if (!context) {
+      return;
+    }
+
+    this.visibleActionContexts.add(context);
+    this.ensurePolling();
+  }
+
+  private markActionHidden(context: string | undefined): void {
+    if (!context) {
+      return;
+    }
+
+    this.visibleActionContexts.delete(context);
+    if (this.visibleActionContexts.size === 0) {
+      this.stopPolling();
+    }
+  }
+
+  private ensurePolling(): void {
+    if (this.pollTimer) {
+      return;
+    }
+
+    this.pollTimer = setInterval(() => {
+      void this.refreshAllVisibleActions();
+    }, this.pollIntervalMs);
+  }
+
+  private stopPolling(): void {
+    if (!this.pollTimer) {
+      return;
+    }
+
+    clearInterval(this.pollTimer);
+    this.pollTimer = undefined;
+  }
+
+  private updateContextClientTracking(
+    context: string | undefined,
+    settings: HubitatControlSettings,
+  ): void {
+    if (!context) {
+      return;
+    }
+
+    const nextKey = this.getClientCacheKey(settings);
+    const prevKey = this.clientKeyByContext.get(context);
+
+    if (prevKey === nextKey) {
+      return;
+    }
+
+    if (prevKey) {
+      this.decrementClientRef(prevKey);
+      this.clientKeyByContext.delete(context);
+    }
+
+    if (nextKey) {
+      this.clientKeyByContext.set(context, nextKey);
+      this.incrementClientRef(nextKey);
+    }
+  }
+
+  private releaseContextClientTracking(context: string | undefined): void {
+    if (!context) {
+      return;
+    }
+
+    const cacheKey = this.clientKeyByContext.get(context);
+    if (!cacheKey) {
+      return;
+    }
+
+    this.clientKeyByContext.delete(context);
+    this.decrementClientRef(cacheKey);
+  }
+
+  private incrementClientRef(cacheKey: string): void {
+    const count = this.clientRefCountByKey.get(cacheKey) ?? 0;
+    this.clientRefCountByKey.set(cacheKey, count + 1);
+  }
+
+  private decrementClientRef(cacheKey: string): void {
+    const count = this.clientRefCountByKey.get(cacheKey);
+    if (count === undefined) {
+      return;
+    }
+
+    if (count <= 1) {
+      this.clientRefCountByKey.delete(cacheKey);
+      this.clientCache.delete(cacheKey);
+      return;
+    }
+
+    this.clientRefCountByKey.set(cacheKey, count - 1);
   }
 
   /**
@@ -408,7 +591,6 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
       | DidReceiveSettingsEvent<HubitatControlSettings>,
   ): Promise<void> {
     const settings = ev.payload.settings ?? {};
-    console.log("[HubitatControl] updateFromDevice settings", settings);
     const client = this.createClient(settings);
 
     if (!client || !settings.deviceId) {
@@ -435,13 +617,6 @@ export class HubitatControl extends SingletonAction<HubitatControlSettings> {
 
   private buildTitle(settings: HubitatControlSettings): string {
     const label = settings.deviceLabel || "Hubitat";
-    //    const stateRaw = settings.lastKnownState;
-    //    const state = stateRaw ? stateRaw.toUpperCase() : "";
-
-    //    if (!state) {
     return label;
-    //    }
-
-    //    return `${label}\n${state}`;
   }
 }
