@@ -23,6 +23,9 @@ com.popcornhax.hubitat-control.sdPlugin/*.log
 # Packaged plugin bundles
 *.streamDeckPlugin
 
+# Agents
+.claude/
+
 ############################
 # macOS noise
 ############################
